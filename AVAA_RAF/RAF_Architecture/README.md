@@ -1,4 +1,4 @@
-# Blind Two-Speaker Audio Separation
+# Speaker Audio Separation
 
 This repository implements a deep learning model for blind two-speaker audio-only separation. It utilizes Permutation Invariant Training (PIT) optimized with Scale-Invariant Signal-to-Distortion Ratio (SI-SDR) loss to separate overlapping voices from a single audio mixture without any visual conditioning.
 
