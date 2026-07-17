@@ -1,23 +1,27 @@
 """
 train.py
-Entry point. Run with:  python train.py
-Resumes automatically from the latest checkpoint in cfg.CKPT_DIR if present,
-so a Colab/Kaggle session that gets killed mid-training can just be re-run.
+
+Training entry point for Kaggle-friendly blind multi-speaker separation.
+It automatically resumes from the latest checkpoint and, when training ends,
+runs a final evaluation pass on that checkpoint so you get metrics plus audio
+samples from the last saved model.
 """
 
-import os
-import time
 import glob
+import os
 import random
+import time
+
 import numpy as np
 import torch
+from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
 
 from config import cfg
 from data.lrs2_dataset import LRS2MixtureDataset, collate_fn
+from metrics_eval import evaluate_checkpoint
 from models.rafravss import RAFRAVSS
-from utils.metrics import si_sdr_loss, compute_all_metrics
+from utils.metrics import pit_si_sdr_loss
 
 
 def set_seed(seed):
@@ -28,8 +32,10 @@ def set_seed(seed):
 
 
 def get_latest_ckpt():
-    ckpts = sorted(glob.glob(os.path.join(cfg.CKPT_DIR, "step_*.pt")),
-                    key=lambda p: int(p.split("_")[-1].split(".")[0]))
+    ckpts = sorted(
+        glob.glob(os.path.join(cfg.CKPT_DIR, "step_*.pt")),
+        key=lambda p: int(os.path.basename(p).split("_")[-1].split(".")[0]),
+    )
     return ckpts[-1] if ckpts else None
 
 
@@ -44,9 +50,10 @@ def save_ckpt(model, optimizer, scheduler, scaler, step, epoch):
         "step": step,
         "epoch": epoch,
     }, path)
-    # keep only the 3 most recent checkpoints to save disk
-    all_ckpts = sorted(glob.glob(os.path.join(cfg.CKPT_DIR, "step_*.pt")),
-                        key=lambda p: int(p.split("_")[-1].split(".")[0]))
+    all_ckpts = sorted(
+        glob.glob(os.path.join(cfg.CKPT_DIR, "step_*.pt")),
+        key=lambda p: int(os.path.basename(p).split("_")[-1].split(".")[0]),
+    )
     for old in all_ckpts[:-3]:
         os.remove(old)
     return path
@@ -55,29 +62,27 @@ def save_ckpt(model, optimizer, scheduler, scaler, step, epoch):
 def lr_lambda(step):
     if step < cfg.WARMUP_STEPS:
         return step / max(1, cfg.WARMUP_STEPS)
-    # simple inverse-sqrt decay after warmup
     return (cfg.WARMUP_STEPS / max(1, step)) ** 0.5
 
 
 @torch.no_grad()
 def validate(model, val_loader, max_batches=20):
     model.eval()
-    all_metrics = {}
+    totals = {}
     n = 0
     for i, batch in enumerate(val_loader):
         if i >= max_batches:
             break
         mix = batch["mix_audio"].to(cfg.DEVICE)
-        target = batch["target_audio"].to(cfg.DEVICE)
-        lips = batch["lip_frames"].to(cfg.DEVICE)
+        target = batch["target_sources"].to(cfg.DEVICE)
         with autocast(enabled=cfg.USE_AMP):
-            est = model(mix, lips)
-        m = compute_all_metrics(est.float(), target.float(), sr=cfg.SAMPLE_RATE)
-        for k, v in m.items():
-            all_metrics[k] = all_metrics.get(k, 0.0) + v
+            est = model(mix, None)
+        loss, reordered, _ = pit_si_sdr_loss(est.float(), target.float())
+        totals["pit_si_sdr_loss"] = totals.get("pit_si_sdr_loss", 0.0) + float(loss.item())
+        totals["reordered_si_sdr"] = totals.get("reordered_si_sdr", 0.0) + float((-loss).item())
         n += 1
     model.train()
-    return {k: v / max(1, n) for k, v in all_metrics.items()}
+    return {k: v / max(1, n) for k, v in totals.items()}
 
 
 def main():
@@ -86,17 +91,26 @@ def main():
 
     train_ds = LRS2MixtureDataset(train=True)
     val_ds = LRS2MixtureDataset(train=False)
-    print(f"Train utterances: {len(train_ds)} | Val utterances: {len(val_ds)}")
+    print(f"Train mixtures: {len(train_ds)} | Val mixtures: {len(val_ds)}")
 
     train_loader = DataLoader(
-        train_ds, batch_size=cfg.BATCH_SIZE, shuffle=True,
-        num_workers=cfg.NUM_WORKERS, collate_fn=collate_fn,
-        pin_memory=True, drop_last=True, persistent_workers=cfg.NUM_WORKERS > 0,
+        train_ds,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=True,
+        num_workers=cfg.NUM_WORKERS,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=cfg.NUM_WORKERS > 0,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg.BATCH_SIZE, shuffle=False,
-        num_workers=cfg.NUM_WORKERS, collate_fn=collate_fn,
-        pin_memory=True, drop_last=True,
+        val_ds,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        collate_fn=collate_fn,
+        pin_memory=True,
+        drop_last=True,
     )
 
     model = RAFRAVSS().to(cfg.DEVICE)
@@ -120,8 +134,9 @@ def main():
         start_epoch = ckpt["epoch"]
 
     train_start_time = time.time()
-    model.train()
     stop_training = False
+    last_saved_ckpt = ckpt_path
+    model.train()
 
     for epoch in range(start_epoch, cfg.EPOCHS):
         if stop_training:
@@ -132,17 +147,17 @@ def main():
             elapsed = time.time() - train_start_time
             if elapsed > cfg.MAX_TRAIN_SECONDS:
                 print(f"Hit MAX_TRAIN_SECONDS budget ({elapsed:.0f}s) -> checkpointing and stopping cleanly.")
-                save_ckpt(model, optimizer, scheduler, scaler, step, epoch)
+                last_saved_ckpt = save_ckpt(model, optimizer, scheduler, scaler, step, epoch)
                 stop_training = True
                 break
 
             mix = batch["mix_audio"].to(cfg.DEVICE, non_blocking=True)
-            target = batch["target_audio"].to(cfg.DEVICE, non_blocking=True)
-            lips = batch["lip_frames"].to(cfg.DEVICE, non_blocking=True)
+            target = batch["target_sources"].to(cfg.DEVICE, non_blocking=True)
 
             with autocast(enabled=cfg.USE_AMP):
-                est = model(mix, lips)
-                loss = si_sdr_loss(est.float(), target.float()) / cfg.GRAD_ACCUM_STEPS
+                est = model(mix, None)
+                loss, _, _ = pit_si_sdr_loss(est.float(), target.float())
+                loss = loss / cfg.GRAD_ACCUM_STEPS
 
             scaler.scale(loss).backward()
 
@@ -156,17 +171,43 @@ def main():
                 step += 1
 
                 if step % 50 == 0:
-                    print(f"epoch {epoch} step {step} | loss(-SI-SDR/accum) {loss.item()*cfg.GRAD_ACCUM_STEPS:.3f} "
-                          f"| lr {scheduler.get_last_lr()[0]:.2e} | mem {torch.cuda.memory_allocated()/1e9:.2f}GB")
+                    mem_gb = torch.cuda.memory_allocated() / 1e9 if cfg.DEVICE.type == "cuda" else 0.0
+                    print(
+                        f"epoch {epoch} step {step} | loss {loss.item() * cfg.GRAD_ACCUM_STEPS:.3f} "
+                        f"| lr {scheduler.get_last_lr()[0]:.2e} | mem {mem_gb:.2f}GB"
+                    )
 
                 if step % cfg.CKPT_EVERY_STEPS == 0:
-                    save_ckpt(model, optimizer, scheduler, scaler, step, epoch)
+                    last_saved_ckpt = save_ckpt(model, optimizer, scheduler, scaler, step, epoch)
 
                 if step % cfg.VAL_EVERY_STEPS == 0:
                     metrics = validate(model, val_loader)
                     print(f"[val @ step {step}] " + " ".join(f"{k}={v:.3f}" for k, v in metrics.items()))
 
-    print("Training finished (or paused for session limit). Final checkpoint saved in", cfg.CKPT_DIR)
+        if not stop_training:
+            last_saved_ckpt = save_ckpt(model, optimizer, scheduler, scaler, step, epoch + 1)
+
+    if last_saved_ckpt is None:
+        last_saved_ckpt = get_latest_ckpt()
+
+    print("Training finished. Running final evaluation on:", last_saved_ckpt)
+    if last_saved_ckpt is not None:
+        summary, csv_path, summary_path, audio_dir, n_saved = evaluate_checkpoint(
+            last_saved_ckpt,
+            split="val",
+            max_samples=cfg.FINAL_EVAL_MAX_SAMPLES,
+            save_audio_n=cfg.FINAL_EVAL_SAVE_AUDIO,
+            batch_size=cfg.FINAL_EVAL_BATCH_SIZE,
+            out_dir=cfg.EVAL_DIR,
+        )
+        print("\n===== Final evaluation summary =====")
+        for k, v in summary.items():
+            print(f"{k:10s} : {v['mean']:.3f} +/- {v['std']:.3f}")
+        print(f"Per-sample metrics : {csv_path}")
+        print(f"Summary CSV        : {summary_path}")
+        print(f"Audio samples ({n_saved} mixes) : {audio_dir}")
+    else:
+        print("No checkpoint was available for final evaluation.")
 
 
 if __name__ == "__main__":
