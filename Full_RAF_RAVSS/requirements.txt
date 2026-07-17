@@ -1,0 +1,6 @@
+torch>=2.1
+torchaudio>=2.1
+opencv-python-headless
+numpy
+pesq
+pystoi
