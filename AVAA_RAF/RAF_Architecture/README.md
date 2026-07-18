@@ -8,7 +8,7 @@ Designed with resource efficiency in mind, the default architecture fits within 
 
 The network is composed of three main stages:
 * **Audio Encoder:** A Conv-TasNet-style 1D convolutional layer that transforms the time-domain mixture into a latent representation.
-* **Dual-Path Transformer Separator:** The core of the model. It processes chunks of the encoded audio using an alternating intra-chunk and inter-chunk self-attention mechanism, (SAI), (SAVI) to capture both short-range and long-range dependencies. It outputs two non-negative masks.
+* **Dual-Path Transformer Separator:** The core of the model. It processes chunks of the encoded audio using an alternating intra-chunk and inter-chunk self-attention mechanism, to capture both short-range and long-range dependencies. It outputs two non-negative masks.
 * **Audio Decoder:** A transposed 1D convolutional layer that reconstructs the separate time-domain waveforms for each speaker by applying the generated masks to the encoded mixture.
 
 ## ✨ Key Features
