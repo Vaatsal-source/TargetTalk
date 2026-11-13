@@ -8,82 +8,43 @@
 
 <p align="center">
   <strong>A PyTorch research codebase for multi-speaker speech separation</strong><br>
-  <em>Extracting a target speaker’s clean speech from mixed audio using visual cues from lip video.</em>
+  <em>A compact dual-path transformer separator for two-speaker mixtures, with a Conv-TasNet baseline.</em>
 </p>
 
 ---
 
 ## Overview
 
-TargetTalk is a research-oriented PyTorch project focused on solving the challenging problem of target speaker extraction in multi-speaker audio scenes. Instead of separating all speakers indiscriminately, the system focuses on one target speaker by leveraging visual information from their lip movements, enabling more robust and speaker-aware speech enhancement.
+TargetTalk is a research project on separating overlapping speakers from a single-channel audio mixture. The current code is an **audio-only, blind two-speaker separator** trained on LRS2 with Permutation Invariant Training (PIT) and an SI-SDR loss. It is designed to run on Kaggle or Colab within a small parameter budget (2.0M to 3.5M parameters).
 
-This repository is designed for experimentation and research workflows in:
-- speech separation
-- target speaker extraction
-- audio-visual learning
-- multimodal signal processing
-- robust speech enhancement
-
-The core idea is simple yet powerful: when multiple speakers are active simultaneously, the target speaker’s mouth motion provides a strong visual cue that helps isolate their voice from the mixture. By combining audio and visual streams, the model learns to emphasize the correct speaker while suppressing interference from others.
 
 ---
 
-## Why TargetTalk?
+## Demo
 
-Multi-speaker environments are inherently difficult because:
-- overlapping voices create strong interference,
-- standard speech separation may not preserve the identity of a desired speaker,
-- target-specific extraction is often more useful in real applications than generic demixing.
+[`DemoRAVSS_2Speakers.mp4`](DemoRAVSS_2Speakers.mp4) is a screen recording of the Kaggle notebook ([`AASS.ipynb`](AASS.ipynb)) playing back results from the step 11354 checkpoint. For each sample it plays five clips:
 
-TargetTalk addresses this by using:
-- mixed audio signal as the primary input,
-- lip video of the target speaker as a conditioning signal,
-- a deep learning model trained to reconstruct the target clean speech waveform.
-
-This makes the system especially relevant for:
-- conferencing
-- assistive listening
-- human-computer interaction
-- speech recognition preprocessing
-- multimodal audio understanding
+- `input_mix`, the overlapping mixture
+- `target_speaker1` and `target_speaker2`, the clean references
+- `estimated_speaker1` and `estimated_speaker2`, the model outputs
 
 ---
 
-## Key Features
+## Model
 
-- Target-speaker speech extraction from mixed audio
-- Lip-driven visual conditioning for speaker identity and timing
-- PyTorch-based training pipeline
-- Modular research codebase for experimentation
-- Support for audio-visual multimodal models
-- Designed for research and extension
-- Easy to adapt for custom datasets and experiments
+The network has three stages:
 
----
+1. **Audio encoder.** A Conv-TasNet-style 1D convolution that maps the time-domain mixture to a latent representation.
+2. **Dual-path transformer separator.** It alternates intra-chunk and inter-chunk self-attention to capture short-range and long-range structure, and outputs two non-negative masks.
+3. **Audio decoder.** A transposed 1D convolution that applies the masks to the encoded mixture and reconstructs one waveform per speaker.
 
-## Research Motivation
+### Training features
 
-Speech separation has traditionally relied on audio-only approaches, which struggle when:
-- speakers overlap heavily,
-- source identities are ambiguous,
-- interference is dynamic or non-stationary.
-
-Visual information from lip motion helps resolve these ambiguities. The mouth region contains speech-related information strongly correlated with the actual audio signal. By conditioning the model on the target speaker’s visual features, the network learns a speaker-aware representation of the audio mixture and can more accurately reconstruct the clean target speech.
-
----
-
-## System Concept
-
-The project follows a common multimodal target extraction pipeline:
-
-1. Input audio mixture contains multiple overlapping speakers.
-2. The target speaker’s lip video is extracted and encoded.
-3. The visual stream provides speaker identity and phonetic timing cues.
-4. The audio encoder processes the mixed waveform.
-5. A fusion module combines audio and visual representations.
-6. The model predicts a clean target speech signal.
-
-This framework is especially effective when the target speaker is known through the visual stream, allowing the model to focus on their voice rather than all possible sources.
+- **Parameter budget.** The default configuration stays between 2.0M and 3.5M parameters. [`count_params.py`](count_params.py) checks this.
+- **Mixed precision and gradient accumulation** to fit small GPUs.
+- **Time-budgeted training.** `MAX_TRAIN_SECONDS` makes the loop save a checkpoint and stop before the cloud session limit. Running `train.py` again resumes from the latest checkpoint.
+- **Epoch-as-subset sampling.** Each epoch draws a fresh random subset of mixtures.
+- **Permutation resolution.** The PIT channel swap is resolved before validation metrics are computed, so the scores reflect real separation quality.
 
 ---
 
@@ -91,275 +52,100 @@ This framework is especially effective when the target speaker is known through 
 
 ```text
 TargetTalk/
-├── configs/                  # Experiment and training configuration files
-├── data/                    # Dataset loaders, preprocessing utilities, and metadata
-├── models/                  # Model architectures and multimodal modules
-├── utils/                   # Helper functions, metrics, logging, and training utilities
-├── scripts/                 # Training, evaluation, and inference entry points
-├── notebooks/               # Exploratory experiments and analysis
-├── checkpoints/             # Saved checkpoints and model weights
-├── logs/                    # Training logs and TensorBoard outputs
-├── README.md                # Project documentation
-├── requirements.txt          # Python dependencies
-├── setup.py                 # Optional packaging configuration
-├── train.py                 # Main training script
-├── evaluate.py              # Evaluation script
-├── infer.py                 # Inference script
-├── LICENSE                  # Project license
-└── .gitignore               # Git ignore rules
+├── AASS.ipynb               # Kaggle notebook: train, evaluate, and listen to samples
+├── Baseline/
+│   └── librimix-convtasnet.ipynb   # Conv-TasNet baseline on LibriMix (Libri2Mix)
+├── config.py                # Hyperparameters, dataset paths, time budget
+├── count_params.py          # Checks the model fits the parameter budget
+├── train.py                 # Training loop (AMP, grad accumulation, checkpoint/resume)
+├── metrics_eval.py          # Standalone evaluation: SI-SDR, SDR, PESQ, STOI
+├── data/
+│   └── lrs2_dataset.py      # LRS2PairMixtureDataset: builds two-speaker mixtures from LRS2 audio
+├── models/
+│   ├── audio_codec.py       # AudioEncoder / AudioDecoder
+│   ├── separator.py         # DualPathSeparator
+│   └── rafravss.py          # TwoSpeakerSeparator: wires the three stages together
+├── utils/
+│   └── metrics.py           # SI-SDR, SDR, PIT loss, permutation resolution, PESQ, STOI
+├── requirements.txt
+├── README_AASS.md           # Detailed notes on the audio-only separator
+└── DemoRAVSS_2Speakers.mp4  # Demo recording
 ```
-
-> Note: The exact directory layout may vary depending on the development stage of the project. The above structure is representative of a typical research codebase for this task.
 
 ---
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8+
-- PyTorch
-- CUDA-capable GPU recommended for training
-- FFmpeg (for audio processing pipelines)
-- Optional: TensorBoard for monitoring
-
-### Clone the repository
-
 ```bash
 git clone https://github.com/Vaatsal-source/TargetTalk.git
 cd TargetTalk
-```
-
-### Create a virtual environment
-
-```bash
 python -m venv venv
 source venv/bin/activate   # Linux / macOS
 # or
 venv\Scripts\activate      # Windows
-```
-
-### Install dependencies
-
-```bash
 pip install -r requirements.txt
+pip install pesq pystoi    # needed for PESQ and STOI during evaluation
 ```
 
-If your environment is missing additional packages, install them as needed:
-
-```bash
-pip install torch torchvision torchaudio
-pip install numpy scipy soundfile tqdm
-pip install tensorboard
-```
+A CUDA-capable GPU is recommended for training.
 
 ---
 
-## Data Preparation
+## Data
 
-TargetTalk typically requires:
-- mixed speech audio recordings,
-- clean target speech reference signals,
-- lip video corresponding to the target speaker.
-
-### Typical dataset format
+The code trains on **LRS2** (Lip Reading Sentences 2). By default `config.py` expects the dataset at `/kaggle/input/datasets/emnabouhajeb/lrs2-v1/mvlrs_v1`, laid out as:
 
 ```text
-data/
-├── train/
-│   ├── audio/
-│   ├── video/
-│   ├── target/
-│   └── metadata.json
-├── val/
-│   ├── audio/
-│   ├── video/
-│   ├── target/
-│   └── metadata.json
-└── test/
-    ├── audio/
-    ├── video/
-    ├── target/
-    └── metadata.json
+mvlrs_v1/
+├── main/<speaker_id>/00001.mp4 (+ .txt)
+└── pretrain/<speaker_id>/00001.mp4 (+ .txt)
 ```
 
-### Preprocessing steps
+The loader reads only the audio track from each mp4 and mixes two utterances from different speakers on the fly. You can supply optional `train.txt`, `val.txt` and `test.txt` file lists, one relative mp4 path per line. Without them the loader makes a deterministic random split.
 
-- resample audio to the target sampling rate,
-- normalize waveform amplitude,
-- extract video frames aligned with audio,
-- crop the mouth region or lip-centered ROI,
-- generate synchronized audio-video pairs,
-- create training/validation/test splits.
+The baseline notebook in `Baseline/` uses **LibriMix** instead.
 
 ---
 
-## Training
+## Usage
 
-Use the training script with a configuration file:
+### 1. Check the parameter budget
 
 ```bash
-python train.py --config configs/default.yaml
+python count_params.py
 ```
 
-Example config may include:
-- learning rate
-- batch size
-- number of epochs
-- audio sampling rate
-- video frame rate
-- optimizer settings
-- augmentation settings
-- checkpoint directory
-
-### Typical training command
+### 2. Train
 
 ```bash
-python train.py \
-  --config configs/targettalk.yaml \
-  --device cuda \
-  --logdir logs/ \
-  --checkpoint_dir checkpoints/
+python train.py
 ```
 
-### Monitoring
+Training resumes automatically from the latest checkpoint in `checkpoints/`.
 
-You can monitor progress with TensorBoard:
+### 3. Evaluate
 
 ```bash
-tensorboard --logdir logs/
+python metrics_eval.py --ckpt checkpoints/step_5000.pt --split val --max_samples 50 --save_audio 5 --out_dir eval_results/step_5000
 ```
 
----
-
-## Evaluation
-
-To evaluate a trained model:
-
-```bash
-python evaluate.py --config configs/default.yaml --weights checkpoints/best_model.pth
-```
-
-Evaluation metrics often include:
-- SI-SDR
-- SDR
-- PESQ
-- STOI
-- speech intelligibility metrics
-- perceptual quality metrics
-
-These metrics help assess how well the model reconstructs the target speaker’s clean speech from the mixed audio.
+This reports SI-SDR, SDR, PESQ and STOI, writes a `summary.csv`, and saves example WAV files (`sampleN_input_mix.wav`, `sampleN_target_speaker1.wav`, `sampleN_estimated_speaker1.wav`, and so on) under `audio_samples/`.
 
 ---
 
-## Inference
+## Baseline
 
-For single-sample or batch inference:
-
-```bash
-python infer.py --config configs/default.yaml --checkpoint checkpoints/best_model.pth --input path/to/audio_mix.wav --video path/to/target_lip_video.mp4
-```
-
-The output is typically:
-- enhanced target speech waveform,
-- optional visualization of spectrograms,
-- optional audio export in WAV format.
+[`Baseline/librimix-convtasnet.ipynb`](Baseline/librimix-convtasnet.ipynb) trains a standard Conv-TasNet with a PIT SI-SDR loss on LibriMix. It gives reference numbers to compare the dual-path transformer against.
 
 ---
 
-## Model Philosophy
+## Roadmap
 
-The underlying objective is to learn a mapping from:
-- mixed waveform + target visual cues
-to:
-- clean speech of the target speaker.
-
-This is a form of speaker-conditioned source extraction. Rather than blindly separating all sources, the model learns to focus on the desired voice using the visual identity and timing cues from the target speaker’s lips.
-
-This is particularly well-suited for:
-- dynamic speaker scenarios,
-- overlapping speech,
-- multimodal speech processing,
-- realistic conversations and meetings.
-
----
-
-## Possible Extensions
-
-This codebase is naturally extensible for research experiments such as:
-- alternative multimodal fusion strategies,
-- transformer-based audio-visual encoders,
-- adversarial learning objectives,
-- self-supervised pretraining,
-- robust performance under noisy conditions,
-- real-time streaming target extraction,
-- multilingual datasets,
-- speaker diarization integration.
-
----
-
-## Example Use Cases
-
-- separating a target participant’s voice in a meeting
-- cleaning speech in cocktail-party scenarios
-- improving ASR performance in overlapping speech
-- enhancing hearing aid processing
-- speech retrieval for target-speaker applications
-
----
-
-## Citation
-
-If you use this project in your research, please consider citing it.
-
-```bibtex
-@misc{targettalk2026,
-  title={TargetTalk: Target Speaker Extraction with Visual Lip Cues},
-  author={Your Name and Contributors},
-  year={2026},
-  howpublished={GitHub repository},
-  url={https://github.com/Vaatsal-source/TargetTalk}
-}
-```
-
-> Replace the author field with your actual contributors if needed.
-
----
-
-## License
-
-This project is licensed under the MIT License unless otherwise specified. See the `LICENSE` file for details.
-
----
-
-## Acknowledgements
-
-This project builds on the foundation of research in:
-- speech separation,
-- target speaker extraction,
-- multimodal learning,
-- audio-visual speech processing,
-- deep learning for signal enhancement.
-
-We thank the broader research community for developing the ideas and methods that make work like this possible.
+- Add an inference script for single files.
+- Compare the dual-path transformer against the Conv-TasNet baseline under the same budget.
 
 ---
 
 ## Contact
 
-For questions, collaboration, or research discussions, feel free to reach out through the repository’s GitHub issues or project discussions.
-
----
-
-## Final Note
-
-TargetTalk is designed as a research-first, modular audio-visual speech separation codebase. It is intended to help researchers and developers explore the potential of using visual lip information as a strong conditioning signal for extracting a target speaker’s speech from complex acoustic mixtures.
-
-If you are building on this project, the most valuable contribution is often a clean reproduction of the methodology, thoughtful evaluation, and careful ablation studies that show how visual information improves target extraction performance.
-
----
-
-<p align="center">
-  <strong>Built for research. Designed for extraction. Focused on the target speaker.</strong>
-</p>
-
+For questions or collaboration, open an issue on the GitHub repository.
